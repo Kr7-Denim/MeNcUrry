@@ -28,7 +28,7 @@ https://abgfgo7aaaaaaaammo4qlji7ci5df.ta.bia-cf.live.pv-cdn.net/pdx-nitro/live/c
 #EXTINF:-1 group-title="WORLDCUP ASU" tvg-logo="https://image-cdn.hypb.st/hypebeast.com/image/2023/05/fifa-unveils-official-2026-world-cup-logo-1.jpg?w=800",CAZE TV 2
 https://live-pv-ta.amazon.fastly-edge.com/iad-nitro/live/clients/dash/enc/epg9sw6owc/out/v1/e50aecefcb294fae85d6b343e0a6f1cc/cenc.mpd
 
-KODIPROP:inputstream.adaptive.license_type=clearkey
+#KODIPROP:inputstream.adaptive.license_type=clearkey
 #KODIPROP:inputstream.adaptive.license_key=9752ef72590ef441ffa3731e0486fbc0:db63ec7b9f11348b7cc6808a54c99457
 #EXTINF:-1 group-title="WORLDCUP ASU" tvg-logo="https://image-cdn.hypb.st/hypebeast.com/image/2023/05/fifa-unveils-official-2026-world-cup-logo-1.jpg?w=800",CAZE TV 3
 https://otte.live.fly.ww.aiv-cdn.net/gru-nitro/live/clients/dash/enc/epg9sw6owc/out/v1/e50aecefcb294fae85d6b343e0a6f1cc/cenc.mpd?amznDtid=AOAGZA014O5RE&encoding=segmentBase
