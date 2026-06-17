@@ -1,63 +1,1356 @@
 const http = require('http');
-const url = require('url');
 
-const PORT = 5000; // Sudah saya sesuaikan dengan port 5000
+// ============================================================================
+// SIARAN — IPTV Tuner Worker Version 6.1 (Dual Mode + Quality Selector)
+// ============================================================================
 
-const server = http.createServer(async (req, res) => {
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', '*');
+// 🛡️ SECURITY SETTINGS
+const ALLOWED_DOMAINS = ["*"]; // Izinkan semua akses karena berjalan di VPS pribadi
+
+const BACKEND_DEFAULT_PLAYLIST = "https://raw.githubusercontent.com/Kr7-Denim/MeNcUrry/refs/heads/main/wiwokdetok.m3u";
+
+const SECRET_KEY = "Siaran@Sec_Key!2026_xV9$p";
+
+// 🚀 URL VPS Proxy Anda (Zero Trust Cloudflare Tunnel)
+const VISION_PROXY_URL = "https://proxy.ajtv.web.id/?url=";
+
+function xorBase64(text, key) {
+  const encoder = new TextEncoder();
+  const bytes = encoder.encode(text);
+  const keyBytes = encoder.encode(key);
+  for (let i = 0; i < bytes.length; i++) bytes[i] ^= keyBytes[i % keyBytes.length];
+  let binary = "";
+  for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+  return btoa(binary);
+}
+
+function dexorBase64(base64, key) {
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  const encoder = new TextEncoder();
+  const keyBytes = encoder.encode(key);
+  for (let i = 0; i < bytes.length; i++) bytes[i] ^= keyBytes[i % keyBytes.length];
+  return new TextDecoder().decode(bytes);
+}
+
+async function handleRequest(request) {
+    const url = new URL(request.url);
+    const reqOrigin = request.headers.get("Origin") || request.headers.get("Referer") || "";
+    
+    let isAllowed = true;
+    let allowedOriginHeader = "*";
+
+    if (ALLOWED_DOMAINS[0] !== "*") {
+      if (reqOrigin) {
+        try {
+          const originUrl = new URL(reqOrigin);
+          const hostname = originUrl.hostname;
+          // Validasi Hostname (exact match atau subdomain)
+          isAllowed = ALLOWED_DOMAINS.some(domain => hostname === domain || hostname.endsWith("." + domain));
+          if (isAllowed) {
+            allowedOriginHeader = originUrl.origin;
+          }
+        } catch(e) {
+          isAllowed = false;
+        }
+      }
+      // Blokir akses proxy dan playlist secara langsung tanpa origin (mencegah pencurian data lewat curl)
+      if (!reqOrigin && (url.pathname.startsWith('/proxy') || url.pathname.startsWith('/api/playlist'))) {
+         isAllowed = false;
+      }
+    }
+
+    if (!isAllowed) {
+      return new Response("Akses Ditolak: Domain tidak diizinkan oleh sistem keamanan web", { status: 403 });
+    }
+
+    if (request.method === "OPTIONS") {
+      return new Response(null, { headers: corsHeaders(allowedOriginHeader) });
+    }
+
+    if (url.pathname === "/" || url.pathname === "/index.html") {
+      return new Response(HTML, {
+        headers: { "content-type": "text/html; charset=UTF-8" },
+      });
+    }
+
+    if (url.pathname === "/api/playlist") {
+      return handlePlaylist(url, request, allowedOriginHeader);
+    }
+
+    if (url.pathname === "/proxy") {
+      return handleProxy(url, request, allowedOriginHeader);
+    }
+
+    return new Response("Not found", { status: 404 });
+}
+
+// ----------------------------------------------------------------------
+// Playlist parsing
+// ----------------------------------------------------------------------
+
+async function handlePlaylist(url, request, allowedOriginHeader = "*") {
+  let target = url.searchParams.get("url");
+  if (!target || target === "default") {
+    target = BACKEND_DEFAULT_PLAYLIST;
+  }
+
+  let resp;
+  try {
+    resp = await fetch(target, {
+      headers: { "User-Agent": "Mozilla/5.0 (SiaranTuner)" },
+    });
+  } catch (e) {
+    return json({ error: "Gagal mengambil playlist: " + e.message }, 502, allowedOriginHeader);
+  }
+
+  if (!resp.ok) return json({ error: `Playlist mengembalikan status ${resp.status}` }, 502, allowedOriginHeader);
+
+  const text = await resp.text();
+  if (!text.includes("#EXTM3U")) return json({ error: "File bukan playlist M3U yang valid" }, 422, allowedOriginHeader);
+
+  const channels = parseM3U(text, target);
+  if (channels.length === 0) return json({ error: "Tidak ada channel ditemukan" }, 422, allowedOriginHeader);
+
+  const payload = JSON.stringify({ channels });
+  return json({ encrypted: xorBase64(payload, SECRET_KEY) }, 200, allowedOriginHeader);
+}
+
+function parseM3U(text, baseUrl) {
+  const lines = text.split(/\r?\n/);
+  const channels = [];
   
-  if (req.method === 'OPTIONS') return res.writeHead(200).end();
+  let currentItem = { drmType: "", drmKey: "", headers: {} };
+  let hasExtInf = false;
 
-  const queryObject = url.parse(req.url, true).query;
-  const targetUrl = queryObject.url;
+  for (let raw of lines) {
+    const line = raw.trim();
+    if (!line) continue;
 
-  if (!targetUrl) {
-    res.writeHead(400, { 'Content-Type': 'application/json' });
-    return res.end(JSON.stringify({ error: 'URL is required' }));
+    if (line.startsWith("#EXTINF")) {
+      hasExtInf = true;
+      const info = line.slice(line.indexOf(":") + 1);
+      const commaIdx = info.lastIndexOf(",");
+      const attrsStr = commaIdx >= 0 ? info.slice(0, commaIdx) : info;
+      currentItem.name = (commaIdx >= 0 ? info.slice(commaIdx + 1) : "Tanpa Nama").trim();
+
+      const attrRegex = /([\w-]+)="([^"]*)"/g;
+      let m;
+      while ((m = attrRegex.exec(attrsStr))) {
+        currentItem[m[1].toLowerCase()] = m[2];
+      }
+      
+      currentItem.logo = currentItem["tvg-logo"] || currentItem["group-logo"] || "";
+      currentItem.group = currentItem["group-title"] || "Lainnya";
+
+    } else if (line.startsWith("#KODIPROP:inputstream.adaptive.license_type=")) {
+      currentItem.drmType = line.substring(line.indexOf("=") + 1).trim().toLowerCase();
+    } else if (line.startsWith("#KODIPROP:inputstream.adaptive.license_key=")) {
+      currentItem.drmKey = line.substring(line.indexOf("=") + 1).trim();
+    } else if (line.startsWith("#KODIPROP:inputstream.adaptive.stream_headers=")) {
+      const hStr = line.substring(line.indexOf("=") + 1).trim();
+      const hParts = hStr.split("&");
+      for (const p of hParts) {
+        const eqIdx = p.indexOf("=");
+        if (eqIdx > 0) {
+          const key = decodeURIComponent(p.substring(0, eqIdx));
+          const val = decodeURIComponent(p.substring(eqIdx + 1));
+          if (key.toLowerCase() === 'user-agent') currentItem.headers['User-Agent'] = val;
+          else if (key.toLowerCase() === 'referer') currentItem.headers['Referer'] = val;
+          else currentItem.headers[key] = val;
+        }
+      }
+    } else if (line.startsWith("#EXTVLCOPT:http-user-agent=")) {
+      currentItem.headers['User-Agent'] = line.substring(line.indexOf("=") + 1).trim();
+    } else if (line.startsWith("#EXTVLCOPT:http-referrer=")) {
+      currentItem.headers['Referer'] = line.substring(line.indexOf("=") + 1).trim();
+    } else if (line.startsWith("#")) {
+      continue; 
+    } else {
+      let urlPart = line;
+
+      if (line.includes("|")) {
+        const parts = line.split("|");
+        urlPart = parts[0];
+        for (let i = 1; i < parts.length; i++) {
+          const p = parts[i];
+          const eqIdx = p.indexOf("=");
+          if (eqIdx > 0) {
+            const key = p.substring(0, eqIdx).trim().toLowerCase();
+            const val = p.substring(eqIdx + 1).trim();
+            if (key === 'user-agent') currentItem.headers['User-Agent'] = val;
+            if (key === 'referer') currentItem.headers['Referer'] = val;
+          }
+        }
+      }
+
+      try { currentItem.url = new URL(urlPart, baseUrl).toString(); } 
+      catch (e) { currentItem.url = urlPart; }
+
+      if (!currentItem.name) currentItem.name = "Tanpa Nama";
+      if (!currentItem.group) currentItem.group = "Lainnya";
+
+      channels.push({ ...currentItem });
+      currentItem = { drmType: "", drmKey: "", headers: {} };
+      hasExtInf = false;
+    }
   }
 
-  const allowedDomains = ['visionplus.id', 'cloudfront.net', 'akamaized.net'];
-  if (!allowedDomains.some(domain => targetUrl.includes(domain))) {
-    res.writeHead(403, { 'Content-Type': 'application/json' });
-    return res.end(JSON.stringify({ error: 'Domain tidak diizinkan' }));
+  return channels.map((c, i) => ({ ...c, number: i + 1 }));
+}
+
+// ----------------------------------------------------------------------
+// Stream & DRM Proxy
+// ----------------------------------------------------------------------
+
+async function handleProxy(url, request, allowedOriginHeader = "*") {
+  let target = "";
+  let customUa = "";
+  let customRef = "";
+  let customHeaders = "";
+  let explicitType = "";
+
+  const q = url.searchParams.get("q");
+  if (q) {
+    try {
+      const decodedQuery = dexorBase64(q, SECRET_KEY);
+      const params = new URLSearchParams(decodedQuery);
+      if (params.has("url")) target = params.get("url");
+      if (params.has("ua")) customUa = params.get("ua");
+      if (params.has("ref")) customRef = params.get("ref");
+      if (params.has("headers")) customHeaders = params.get("headers");
+      if (params.has("type")) explicitType = params.get("type");
+    } catch(e) {}
+  } else {
+    return new Response("Akses Ditolak: URL wajib dienkripsi", { status: 403 });
   }
 
-  const headers = { ...req.headers };
-  delete headers['host'];
-  delete headers['connection'];
+  if (!target) return new Response("Parameter 'url' tidak ditemukan di payload terenkripsi", { status: 400 });
+
+  let targetOrigin = "";
+  try { 
+    const u = new URL(target);
+    const host = u.hostname;
+    
+    const isIp = /^([0-9]{1,3}\.){3}[0-9]{1,3}$/.test(host);
+    if (isIp) {
+      const parts = host.split('.').map(Number);
+      // SSRF Protection: Blokir akses ke IP Private, Loopback, dan Cloud Metadata
+      if (
+        parts[0] === 127 ||
+        parts[0] === 10 ||
+        (parts[0] === 172 && parts[1] >= 16 && parts[1] <= 31) ||
+        (parts[0] === 192 && parts[1] === 168) ||
+        (parts[0] === 169 && parts[1] === 254) ||
+        parts[0] === 0
+      ) {
+        return new Response("Akses Ditolak: SSRF terdeteksi (Internal IP)", { status: 403 });
+      }
+      u.hostname += ".nip.io";
+      target = u.toString();
+    }
+    targetOrigin = u.origin; 
+  } 
+  catch (e) { return new Response("URL tidak valid", { status: 400 }); }
+
+  const reqHeaders = new Headers();
+  
+  if (customUa) {
+    reqHeaders.set("User-Agent", customUa);
+  } else {
+    reqHeaders.set("User-Agent", request.headers.get("User-Agent") || "Mozilla/5.0 (Windows NT 10.0; Win64; x64)");
+  }
+
+  reqHeaders.set("Accept", "*/*");
+  reqHeaders.set("Accept-Language", "en-US,en;q=0.9");
+
+  const range = request.headers.get("range");
+  if (range) reqHeaders.set("Range", range);
+
+  if (customRef) {
+    reqHeaders.set("Referer", customRef);
+    try { 
+      reqHeaders.set("Origin", new URL(customRef).origin); 
+    } catch (e) {}
+  }
+
+  if (customHeaders) {
+    try {
+      const arr = JSON.parse(customHeaders);
+      for (const h of arr) {
+        const idx = h.indexOf(":");
+        if (idx > 0) {
+          reqHeaders.set(h.substring(0, idx).trim(), h.substring(idx + 1).trim());
+        }
+      }
+    } catch(e) {}
+  }
+
+  let fetchOpts = { method: request.method, headers: reqHeaders, redirect: "manual" };
+  let reqBodyBuf = null;
+  if (request.method !== "GET" && request.method !== "HEAD") {
+    reqBodyBuf = await request.arrayBuffer();
+    fetchOpts.body = reqBodyBuf;
+    const ct = request.headers.get("content-type") || "application/octet-stream";
+    reqHeaders.set("Content-Type", ct);
+  }
+
+  // --- 🚀 BYPASS VISION+ VIA VERCEL NODE.JS PROXY ---
+  const isVisionPlus = target.includes("visionplus.id") || 
+                       (customRef && customRef.includes("visionplus.id")) ||
+                       target.includes("cloudfront.net") || 
+                       target.includes("akamaized.net");
+                       
+  if (isVisionPlus && typeof VISION_PROXY_URL !== "undefined" && !VISION_PROXY_URL.includes("GANTI_DENGAN_URL_VERCEL_ANDA")) {
+    target = VISION_PROXY_URL + encodeURIComponent(target);
+  }
+  // --------------------------------------------------
+
+  let upstream;
+  let currentTarget = target;
+  let redirectCount = 0;
 
   try {
-    const response = await fetch(targetUrl, {
-      method: req.method,
-      headers: headers,
-      redirect: 'follow'
-    });
+    while (redirectCount < 5) {
+      upstream = await fetch(currentTarget, fetchOpts);
+      if ([301, 302, 303, 307, 308].includes(upstream.status)) {
+        const loc = upstream.headers.get("location");
+        if (loc) {
+          currentTarget = new URL(loc, currentTarget).toString();
+          if (upstream.status === 301 || upstream.status === 302 || upstream.status === 303) {
+            fetchOpts.method = "GET";
+            delete fetchOpts.body;
+          } else {
+            // 307 & 308 -> Pertahankan method & POST body!
+            if (reqBodyBuf) fetchOpts.body = reqBodyBuf.slice(0); // pass fresh copy of buffer
+          }
+          redirectCount++;
+          continue;
+        }
+      }
+      break;
+    }
+  } catch (e) {
+    return new Response("Gagal mengambil stream: " + e.message, { status: 502 });
+  }
 
-    response.headers.forEach((val, key) => {
-      if (!['content-encoding', 'transfer-encoding', 'access-control-allow-origin', 'content-length'].includes(key.toLowerCase())) {
-        res.setHeader(key, val);
+  const contentType = upstream.headers.get("content-type") || "";
+  
+  const isM3U8 = explicitType === "m3u8" || target.split("?")[0].endsWith(".m3u8") || contentType.includes("mpegurl") || contentType.includes("m3u8");
+
+  if (isM3U8 && request.method === "GET") {
+    const text = await upstream.text();
+    const finalUrl = upstream.url || target;
+    const rewritten = rewriteManifest(text, finalUrl, customUa, customRef, customHeaders, url.origin);
+    return new Response(rewritten, {
+      status: upstream.status,
+      headers: corsHeaders(allowedOriginHeader, { "content-type": "application/vnd.apple.mpegurl", "cache-control": "no-store" }),
+    });
+  }
+
+  const passthroughHeaders = corsHeaders(allowedOriginHeader, {
+    "content-type": contentType || "application/octet-stream",
+    "cache-control": "public, max-age=15",
+  });
+
+  const contentRange = upstream.headers.get("content-range");
+  if (contentRange) passthroughHeaders["content-range"] = contentRange;
+  const acceptRanges = upstream.headers.get("accept-ranges");
+  if (acceptRanges) passthroughHeaders["accept-ranges"] = acceptRanges;
+
+  return new Response(upstream.body, { status: upstream.status, headers: passthroughHeaders });
+}
+
+function rewriteManifest(text, baseUrl, ua, ref, customHeaders, proxyOrigin = "") {
+  const lines = text.split(/\r?\n/);
+  let nextIsPlaylist = false;
+  const out = lines.map((line) => {
+    const trimmed = line.trim();
+    if (!trimmed) return line;
+
+    if (trimmed.startsWith("#")) {
+      if (trimmed.startsWith("#EXT-X-STREAM-INF") || trimmed.startsWith("#EXT-X-I-FRAME-STREAM-INF")) {
+        nextIsPlaylist = true;
+      }
+      if (trimmed.includes("URI=")) {
+        return trimmed.replace(/URI="([^"]+)"/g, (_, p1) => {
+          if (p1.startsWith('data:') || p1.startsWith('skd:') || p1.startsWith('blob:')) return `URI="${p1}"`;
+          const abs = resolveUrl(p1, baseUrl);
+          const params = new URLSearchParams();
+          params.set("url", abs);
+          if (ua) params.set("ua", ua);
+          if (ref) params.set("ref", ref);
+          if (customHeaders) params.set("headers", customHeaders);
+          if (trimmed.startsWith("#EXT-X-MEDIA")) params.set("type", "m3u8");
+          const encQ = xorBase64(params.toString(), SECRET_KEY);
+          return `URI="${proxyOrigin}/proxy?q=${encodeURIComponent(encQ)}"`;
+        });
+      }
+      return trimmed;
+    }
+
+    const abs = resolveUrl(trimmed, baseUrl);
+    if (!nextIsPlaylist && (abs.includes('.mp4') || abs.includes('.ts') || abs.includes('.m4s') || abs.includes('.m4a') || abs.includes('brightcove'))) {
+      return abs;
+    }
+
+    const params = new URLSearchParams();
+    params.set("url", abs);
+    if (ua) params.set("ua", ua);
+    if (ref) params.set("ref", ref);
+    if (customHeaders) params.set("headers", customHeaders);
+    if (nextIsPlaylist) {
+      params.set("type", "m3u8");
+      nextIsPlaylist = false;
+    }
+    const encQ = xorBase64(params.toString(), SECRET_KEY);
+    return `${proxyOrigin}/proxy?q=${encodeURIComponent(encQ)}`;
+  });
+  return out.join("\n");
+}
+
+function resolveUrl(u, base) {
+  try { return new URL(u, base).toString(); } catch (e) { return u; }
+}
+
+
+function corsHeaders(origin = "*", extra = {}) {
+  return {
+    "Access-Control-Allow-Origin": origin,
+    "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS, HEAD",
+    "Access-Control-Allow-Headers": "Range, Content-Type, Authorization, Accept, User-Agent, Referer, Origin, X-Requested-With, Cache-Control",
+    "Access-Control-Expose-Headers": "Content-Length, Content-Range, Content-Type, Accept-Ranges",
+    ...extra,
+  };
+}
+
+function json(obj, status = 200, origin = "*") {
+  return new Response(JSON.stringify(obj), {
+    status,
+    headers: corsHeaders(origin, { "content-type": "application/json; charset=UTF-8" }),
+  });
+}
+
+// ----------------------------------------------------------------------
+// UI Template (HTML, CSS & JS)
+// ----------------------------------------------------------------------
+
+const CSS = `
+:root {
+  --bg: #11141a; --panel: #1b1f27; --panel-2: #20252f;
+  --line: #2a2f3a; --text: #ece9e2; --text-dim: #8a90a0;
+  --amber: #f5a623; --amber-dim: #b9802a; --amber-glow: rgba(245, 166, 35, 0.35);
+  --live: #e5484d; --radius: 6px;
+}
+* { box-sizing: border-box; }
+html, body {
+  margin: 0; height: 100%; background: var(--bg); color: var(--text);
+  font-family: 'Inter', system-ui, sans-serif; -webkit-font-smoothing: antialiased;
+}
+.app { display: flex; flex-direction: column; height: 100vh; }
+.topbar { display: flex; align-items: center; gap: 24px; padding: 14px 20px; border-bottom: 1px solid var(--line); background: var(--panel); flex-wrap: wrap; }
+.brand { display: flex; align-items: baseline; gap: 8px; flex-shrink: 0; }
+.brand-mark { font-family: 'Oswald', sans-serif; font-weight: 600; font-size: 22px; letter-spacing: 0.12em; color: var(--text); }
+.brand-sub { font-family: 'IBM Plex Mono', monospace; font-size: 11px; letter-spacing: 0.08em; color: var(--amber); text-transform: uppercase; border: 1px solid var(--amber-dim); border-radius: 3px; padding: 2px 6px; }
+.online-users { display: flex; align-items: center; gap: 8px; font-family: 'IBM Plex Mono', monospace; font-size: 12px; color: var(--text-dim); background: var(--panel-2); padding: 4px 10px; border-radius: 999px; border: 1px solid var(--line); flex-shrink: 0; margin-left: 8px; }
+.online-users strong { color: var(--text); font-weight: 500; font-size: 13px; }
+.toggle-chat-btn { background: var(--panel-2); border: 1px solid var(--line); border-radius: 999px; color: var(--text); padding: 4px 14px; display: flex; align-items: center; gap: 6px; font-family: 'Oswald', sans-serif; font-size: 12px; font-weight: 500; letter-spacing: 0.05em; cursor: pointer; transition: all 0.15s ease; text-transform: uppercase; margin-left: auto; }
+.toggle-chat-btn:hover { border-color: var(--amber); color: var(--amber); }
+.chat-sidebar.hidden { display: none !important; }
+.pulse-dot { width: 8px; height: 8px; background-color: #22c55e; border-radius: 50%; box-shadow: 0 0 0 0 rgba(34, 197, 94, 0.7); animation: pulse 2s infinite; }
+@keyframes pulse { 0% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(34, 197, 94, 0.7); } 70% { transform: scale(1); box-shadow: 0 0 0 6px rgba(34, 197, 94, 0); } 100% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(34, 197, 94, 0); } }
+.playlist-form { display: flex; gap: 8px; flex: 1; min-width: 240px; }
+.playlist-select { background: var(--panel-2); border: 1px solid var(--line); border-radius: var(--radius); color: var(--text); padding: 9px 12px; font-size: 14px; outline: none; cursor: pointer; font-family: 'Inter', sans-serif; transition: border-color 0.15s ease; }
+.playlist-select:focus { border-color: var(--amber); box-shadow: 0 0 0 3px var(--amber-glow); }
+.playlist-form input { flex: 1; background: var(--panel-2); border: 1px solid var(--line); border-radius: var(--radius); color: var(--text); padding: 9px 12px; font-size: 14px; font-family: 'IBM Plex Mono', monospace; outline: none; }
+.playlist-form input::placeholder { color: var(--text-dim); }
+.playlist-form input:focus { border-color: var(--amber); box-shadow: 0 0 0 3px var(--amber-glow); }
+.playlist-form button { background: var(--amber); color: #1a1300; border: none; border-radius: var(--radius); font-family: 'Oswald', sans-serif; font-weight: 600; letter-spacing: 0.06em; font-size: 13px; text-transform: uppercase; padding: 0 20px; cursor: pointer; transition: filter 0.15s ease; }
+.playlist-form button:hover { filter: brightness(1.1); }
+.playlist-form button:disabled { opacity: 0.6; cursor: default; }
+.layout { display: flex; flex: 1; min-height: 0; }
+.sidebar { width: 320px; flex-shrink: 0; background: var(--panel); border-right: 1px solid var(--line); display: flex; flex-direction: column; min-height: 0; }
+.sidebar-controls { padding: 14px; border-bottom: 1px solid var(--line); display: flex; flex-direction: column; gap: 10px; }
+#searchInput { background: var(--panel-2); border: 1px solid var(--line); border-radius: var(--radius); color: var(--text); padding: 8px 10px; font-size: 13px; outline: none; }
+#searchInput:focus { border-color: var(--amber); box-shadow: 0 0 0 3px var(--amber-glow); }
+.group-chips { display: flex; flex-wrap: wrap; gap: 6px; max-height: 70px; overflow-y: auto; }
+.chip { font-family: 'IBM Plex Mono', monospace; font-size: 11px; letter-spacing: 0.03em; color: var(--text-dim); border: 1px solid var(--line); border-radius: 999px; padding: 4px 10px; cursor: pointer; background: transparent; transition: all 0.15s ease; white-space: nowrap; }
+.chip:hover { border-color: var(--amber-dim); color: var(--text); }
+.chip.active { background: var(--amber); border-color: var(--amber); color: #1a1300; }
+.channel-list { flex: 1; overflow-y: auto; padding: 6px; }
+.channel-item { display: flex; align-items: center; gap: 12px; padding: 8px 10px; border-radius: var(--radius); cursor: pointer; transition: background 0.12s ease; border: 1px solid transparent; }
+.channel-item:hover { background: var(--panel-2); }
+.channel-item.active { background: var(--panel-2); border-color: var(--amber-dim); }
+.channel-number { font-family: 'IBM Plex Mono', monospace; font-size: 12px; color: var(--text-dim); width: 32px; text-align: right; flex-shrink: 0; }
+.channel-item.active .channel-number { color: var(--amber); }
+.channel-logo { width: 32px; height: 32px; border-radius: 4px; background: var(--panel-2); object-fit: contain; flex-shrink: 0; border: 1px solid var(--line); }
+.channel-info { display: flex; flex-direction: column; min-width: 0; }
+.channel-name { font-size: 13px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.channel-group { font-size: 11px; color: var(--text-dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sidebar-footer { padding: 10px 14px; border-top: 1px solid var(--line); font-family: 'IBM Plex Mono', monospace; font-size: 11px; color: var(--text-dim); letter-spacing: 0.05em; }
+.empty-state { padding: 28px 16px; text-align: center; color: var(--text-dim); }
+.empty-title { font-family: 'Oswald', sans-serif; font-size: 15px; letter-spacing: 0.05em; color: var(--text); margin: 0 0 6px; }
+.empty-body { font-size: 12.5px; line-height: 1.5; margin: 0; }
+.empty-body strong { color: var(--amber); }
+.main { flex: 1; display: flex; flex-direction: column; min-width: 0; background: #05060a; }
+.player-wrap { position: relative; flex: 1; background: #000; display: flex; align-items: center; justify-content: center; min-height: 0; }
+#video { width: 100%; height: 100%; max-height: 100%; background: #000; }
+.player-placeholder { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: var(--text-dim); font-family: 'IBM Plex Mono', monospace; font-size: 13px; letter-spacing: 0.05em; pointer-events: none; }
+.player-placeholder.hidden { display: none; }
+.tuning-overlay { position: absolute; inset: 0; background: repeating-linear-gradient(to bottom, rgba(245,166,35,0.10) 0px, rgba(245,166,35,0.10) 2px, transparent 2px, transparent 4px); opacity: 0; pointer-events: none; }
+.tuning-overlay.active { animation: tune 0.4s steps(6, end); }
+@keyframes tune { 0% { opacity: 0.85; } 40% { opacity: 0.4; } 70% { opacity: 0.65; } 100% { opacity: 0; } }
+.readout { display: flex; align-items: center; gap: 18px; padding: 14px 20px; border-top: 1px solid var(--line); background: var(--panel); flex-shrink: 0; }
+.readout-number { font-family: 'Oswald', sans-serif; font-weight: 700; font-size: 34px; letter-spacing: 0.06em; color: var(--amber); text-shadow: 0 0 12px var(--amber-glow); min-width: 70px; text-align: center; background: #000; border: 1px solid var(--line); border-radius: var(--radius); padding: 4px 10px; font-variant-numeric: tabular-nums; }
+.readout-info { display: flex; flex-direction: column; gap: 4px; min-width: 0; flex: 1; }
+.readout-name { font-family: 'Oswald', sans-serif; font-size: 18px; letter-spacing: 0.03em; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.readout-meta { font-family: 'IBM Plex Mono', monospace; font-size: 12px; color: var(--text-dim); display: flex; align-items: center; gap: 8px; }
+.readout-divider { opacity: 0.4; }
+.readout-status-wrap { display: flex; align-items: center; gap: 10px; flex-shrink: 0; }
+.quality-select { background: #000; border: 1px solid var(--line); border-radius: 4px; color: var(--text); padding: 4px 8px; font-size: 11px; font-family: 'IBM Plex Mono', monospace; outline: none; cursor: pointer; transition: border-color 0.15s ease; }
+.quality-select:focus { border-color: var(--amber); }
+.quality-select.hidden { display: none; }
+.readout-status { font-family: 'IBM Plex Mono', monospace; font-size: 11px; letter-spacing: 0.1em; text-transform: uppercase; padding: 4px 10px; border-radius: 999px; border: 1px solid var(--line); color: var(--text-dim); white-space: nowrap; }
+.readout-status.live { color: var(--live); border-color: var(--live); }
+.readout-status.live::before { content: "● "; }
+.readout-status.error { color: var(--live); border-color: var(--live); }
+.readout-status.loading { color: var(--amber); border-color: var(--amber-dim); }
+.channel-list::-webkit-scrollbar, .group-chips::-webkit-scrollbar { width: 6px; height: 6px; }
+.channel-list::-webkit-scrollbar-thumb, .group-chips::-webkit-scrollbar-thumb { background: var(--line); border-radius: 3px; }
+.ticker-wrap { background: var(--panel); border-top: 1px solid var(--line); overflow: hidden; white-space: nowrap; flex-shrink: 0; }
+.ticker-content { display: inline-block; padding-left: 100%; animation: ticker 25s linear infinite; font-family: 'IBM Plex Mono', monospace; font-size: 12.5px; color: var(--text-dim); padding-top: 7px; padding-bottom: 7px; }
+.ticker-text { margin-right: 20px; letter-spacing: 0.02em; color: #38bdf8; font-weight: 500; }
+.ticker-highlight { color: var(--amber); font-weight: 700; font-family: 'Oswald', sans-serif; font-size: 14px; letter-spacing: 0.1em; text-transform: uppercase; text-shadow: 0 0 10px rgba(245, 166, 35, 0.6); }
+@keyframes ticker { 0% { transform: translateX(0); } 100% { transform: translateX(-100%); } }
+.ticker-wrap:hover .ticker-content { animation-play-state: paused; }
+.chat-sidebar { width: 260px; flex-shrink: 0; background: var(--panel); border-left: 1px solid var(--line); display: flex; flex-direction: column; min-height: 0; box-shadow: -4px 0 15px rgba(0,0,0,0.4); z-index: 10; }
+.chat-header { padding: 14px 16px; border-bottom: 1px solid var(--line); font-family: 'Oswald', sans-serif; font-weight: 600; font-size: 14px; letter-spacing: 0.05em; color: var(--amber); display: flex; align-items: center; justify-content: space-between; background: #0a0c10; text-transform: uppercase; }
+.chat-header-title { display: flex; align-items: center; gap: 8px; }
+.chat-body { flex: 1; min-height: 0; background: #05060a; position: relative; overflow: hidden; }
+#chatContainer > div { position: absolute !important; top: 0 !important; left: 0 !important; width: 100% !important; height: 100% !important; max-height: 100% !important; bottom: auto !important; right: auto !important; transform: none !important; margin: 0 !important; }
+@media (max-width: 860px) { .layout { flex-direction: column; overflow-y: auto; } .main { order: 1; flex: none; } .chat-sidebar { order: 2; width: 100%; border-left: none; border-bottom: 1px solid var(--line); border-top: 1px solid var(--line); height: 400px; flex: none; } .sidebar { order: 3; width: 100%; border-right: none; height: 50vh; flex: none; max-height: none; } .player-wrap { aspect-ratio: 16 / 9; flex: none; } .readout-number { font-size: 26px; min-width: 56px; } .readout-name { font-size: 15px; } .readout { flex-wrap: wrap; } .readout-status-wrap { width: 100%; justify-content: space-between; margin-top: 8px; } .topbar { height: auto; padding: 12px 16px; justify-content: center; gap: 10px; } .playlist-form { flex-wrap: wrap; flex: 1 1 100%; min-width: 100%; margin-top: 4px; } .playlist-select { width: 100%; flex: none; } .custom-url-wrap { flex-wrap: wrap; } .playlist-form input { width: 100%; flex: none; } .playlist-form button { width: 100%; flex: none; } }
+@media (prefers-reduced-motion: reduce) { .tuning-overlay.active { animation: none; opacity: 0; } }
+a:focus-visible, button:focus-visible, input:focus-visible, .channel-item:focus-visible, .chip:focus-visible, .quality-select:focus-visible { outline: 2px solid var(--amber); outline-offset: 2px; }
+`;
+
+const JS = `
+const SECRET_KEY = "Siaran@Sec_Key!2026_xV9$p";
+
+function xorBase64(text, key) {
+  const encoder = new TextEncoder();
+  const bytes = encoder.encode(text);
+  const keyBytes = encoder.encode(key);
+  for (let i = 0; i < bytes.length; i++) bytes[i] ^= keyBytes[i % keyBytes.length];
+  let binary = "";
+  for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+  return btoa(binary);
+}
+
+function dexorBase64(base64, key) {
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  const encoder = new TextEncoder();
+  const keyBytes = encoder.encode(key);
+  for (let i = 0; i < bytes.length; i++) bytes[i] ^= keyBytes[i % keyBytes.length];
+  return new TextDecoder().decode(bytes);
+}
+
+const DEFAULT_URL_FLAG = 'default';
+const STORAGE_MODE_KEY = 'siaran:playlistMode';
+const STORAGE_URL_KEY = 'siaran:customPlaylist';
+
+const els = {
+  form: document.getElementById('playlistForm'),
+  modeSelect: document.getElementById('playlistMode'),
+  urlInput: document.getElementById('playlistUrl'),
+  loadBtn: document.getElementById('loadBtn'),
+  search: document.getElementById('searchInput'),
+  chips: document.getElementById('groupChips'),
+  list: document.getElementById('channelList'),
+  count: document.getElementById('channelCount'),
+  video: document.getElementById('video'),
+  tuning: document.getElementById('tuningOverlay'),
+  placeholder: document.getElementById('playerPlaceholder'),
+  roNumber: document.getElementById('readoutNumber'),
+  roName: document.getElementById('readoutName'),
+  roGroup: document.getElementById('readoutGroup'),
+  roStat: document.getElementById('readoutStat'),
+  roStatus: document.getElementById('readoutStatus'),
+  quality: document.getElementById('qualitySelect'),
+};
+
+let allChannels = [];
+let activeGroup = 'Semua';
+let activeChannel = null;
+let hls = null;
+let shakaPlayer = null;
+
+const savedMode = localStorage.getItem(STORAGE_MODE_KEY) || 'default';
+const savedCustomUrl = localStorage.getItem(STORAGE_URL_KEY) || '';
+
+els.modeSelect.value = savedMode;
+
+if (savedMode === 'default') {
+  els.urlInput.value = '';
+  els.urlInput.style.display = 'none';
+  els.urlInput.removeAttribute('required');
+  loadPlaylist(DEFAULT_URL_FLAG);
+} else {
+  els.urlInput.value = savedCustomUrl;
+  els.urlInput.style.display = 'block';
+  els.urlInput.setAttribute('required', 'true');
+  if (savedCustomUrl) loadPlaylist(savedCustomUrl);
+}
+
+els.modeSelect.addEventListener('change', (e) => {
+  const mode = e.target.value;
+  localStorage.setItem(STORAGE_MODE_KEY, mode);
+
+  if (mode === 'default') {
+    els.urlInput.value = '';
+    els.urlInput.style.display = 'none';
+    els.urlInput.removeAttribute('required');
+    loadPlaylist(DEFAULT_URL_FLAG);
+  } else {
+    const lastUrl = localStorage.getItem(STORAGE_URL_KEY) || '';
+    els.urlInput.value = lastUrl;
+    els.urlInput.style.display = 'block';
+    els.urlInput.setAttribute('required', 'true');
+    if (lastUrl) {
+      loadPlaylist(lastUrl);
+    } else {
+      allChannels = [];
+      els.list.innerHTML = '<div class="empty-state"><p class="empty-title">Belum ada siaran</p><p class="empty-body">Tempel URL playlist M3U/M3U8 di atas, lalu tekan <strong>Muat</strong>.</p></div>';
+      els.chips.innerHTML = '';
+      els.count.textContent = '';
+    }
+  }
+});
+
+els.form.addEventListener('submit', (e) => {
+  e.preventDefault();
+  const mode = els.modeSelect.value;
+  if (mode === 'default') {
+    loadPlaylist(DEFAULT_URL_FLAG);
+  } else {
+    const url = els.urlInput.value.trim();
+    if (!url) return;
+    localStorage.setItem(STORAGE_URL_KEY, url);
+    loadPlaylist(url);
+  }
+});
+
+els.search.addEventListener('input', renderList);
+
+// --- Quality Selection Logic ---
+els.quality.addEventListener('change', (e) => {
+  const val = e.target.value;
+  if (hls) {
+    hls.currentLevel = parseInt(val, 10);
+  } else if (shakaPlayer) {
+    if (val === 'auto') {
+      shakaPlayer.configure({ abr: { enabled: true } });
+    } else {
+      shakaPlayer.configure({ abr: { enabled: false } });
+      const tracks = shakaPlayer.getVariantTracks();
+      const targetHeight = parseInt(val, 10);
+      const track = tracks.find(t => t.height === targetHeight);
+      if (track) shakaPlayer.selectVariantTrack(track, true);
+    }
+  }
+});
+
+function updateHlsQualitySelect() {
+  if (!hls.levels || hls.levels.length <= 1) {
+    els.quality.classList.add('hidden');
+    return;
+  }
+  els.quality.innerHTML = '<option value="-1">Auto</option>';
+  hls.levels.forEach((level, i) => {
+    const res = level.height ? level.height + 'p' : Math.round(level.bitrate / 1000) + 'kbps';
+    els.quality.innerHTML += \`<option value="\${i}">\${res}</option>\`;
+  });
+  els.quality.value = "-1";
+  els.quality.classList.remove('hidden');
+}
+
+function updateShakaQualitySelect() {
+  const tracks = shakaPlayer.getVariantTracks();
+  const heights = [...new Set(tracks.filter(t => t.height).map(t => t.height))].sort((a, b) => b - a);
+  
+  if (heights.length <= 1) {
+    els.quality.classList.add('hidden');
+    return;
+  }
+  
+  els.quality.innerHTML = '<option value="auto">Auto</option>';
+  heights.forEach(h => {
+    els.quality.innerHTML += \`<option value="\${h}">\${h}p</option>\`;
+  });
+  els.quality.value = "auto";
+  els.quality.classList.remove('hidden');
+}
+// -------------------------------
+
+async function loadPlaylist(url) {
+  setLoadingState(true);
+  els.list.innerHTML = '<div class="empty-state"><p class="empty-title">Memuat playlist...</p></div>';
+  try {
+    const res = await fetch('/api/playlist?url=' + encodeURIComponent(url));
+    const data = await res.json();
+    if (!res.ok || data.error) throw new Error(data.error || 'Gagal memuat playlist');
+    
+    let decodedData = data;
+    if (data.encrypted) {
+      try {
+        decodedData = JSON.parse(dexorBase64(data.encrypted, SECRET_KEY));
+      } catch(e) { throw new Error("Gagal dekripsi playlist"); }
+    }
+    allChannels = decodedData.channels || [];
+    activeGroup = 'Semua';
+    renderChips();
+    renderList();
+  } catch (err) {
+    els.list.innerHTML = '<div class="empty-state"><p class="empty-title">Gagal memuat</p><p class="empty-body">' + escapeHtml(err.message) + '</p></div>';
+    allChannels = [];
+    els.chips.innerHTML = '';
+    els.count.textContent = '';
+  } finally {
+    setLoadingState(false);
+  }
+}
+
+function setLoadingState(loading) {
+  els.loadBtn.disabled = loading;
+  els.loadBtn.textContent = loading ? 'Memuat...' : 'Muat';
+}
+
+function renderChips() {
+  const groups = ['Semua', ...new Set(allChannels.map(c => c.group))];
+  els.chips.innerHTML = '';
+  for (const g of groups) {
+    const chip = document.createElement('button');
+    chip.className = 'chip' + (g === activeGroup ? ' active' : '');
+    chip.type = 'button';
+    chip.textContent = g;
+    chip.addEventListener('click', () => {
+      activeGroup = g;
+      renderChips();
+      renderList();
+    });
+    els.chips.appendChild(chip);
+  }
+}
+
+function renderList() {
+  const query = els.search.value.trim().toLowerCase();
+  const filtered = allChannels.filter(c => {
+    const inGroup = activeGroup === 'Semua' || c.group === activeGroup;
+    const inSearch = !query || c.name.toLowerCase().includes(query);
+    return inGroup && inSearch;
+  });
+
+  if (filtered.length === 0) {
+    els.list.innerHTML = '<div class="empty-state"><p class="empty-title">Tidak ada hasil</p><p class="empty-body">Coba kata kunci atau kategori lain.</p></div>';
+  } else {
+    els.list.innerHTML = '';
+    for (const ch of filtered) {
+      const item = document.createElement('div');
+      item.className = 'channel-item' + (activeChannel && activeChannel.url === ch.url ? ' active' : '');
+      item.tabIndex = 0;
+      item.setAttribute('role', 'button');
+
+      const num = document.createElement('div');
+      num.className = 'channel-number';
+      num.textContent = String(ch.number).padStart(3, '0');
+
+      let logo;
+      if (ch.logo) {
+        logo = document.createElement('img');
+        logo.className = 'channel-logo';
+        logo.src = ch.logo;
+        logo.loading = 'lazy';
+        logo.alt = '';
+        logo.onerror = () => { logo.style.visibility = 'hidden'; };
+      } else {
+        logo = document.createElement('div');
+        logo.className = 'channel-logo';
+      }
+
+      const info = document.createElement('div');
+      info.className = 'channel-info';
+      const name = document.createElement('div');
+      name.className = 'channel-name';
+      name.textContent = ch.name;
+      const group = document.createElement('div');
+      group.className = 'channel-group';
+      group.textContent = ch.group;
+      info.appendChild(name);
+      info.appendChild(group);
+
+      item.appendChild(num);
+      item.appendChild(logo);
+      item.appendChild(info);
+
+      item.addEventListener('click', () => playChannel(ch));
+      item.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); playChannel(ch); }
+      });
+
+      els.list.appendChild(item);
+    }
+  }
+
+  els.count.textContent = filtered.length + ' / ' + allChannels.length + ' channel';
+}
+
+async function playChannel(ch) {
+  activeChannel = ch;
+  renderList();
+
+  els.placeholder.classList.add('hidden');
+  els.quality.classList.add('hidden');
+  els.quality.innerHTML = '';
+  
+  els.roNumber.textContent = String(ch.number).padStart(3, '0');
+  els.roName.textContent = ch.name;
+  els.roGroup.textContent = ch.group;
+  els.roStat.textContent = '--x-- · -- kbps';
+  setStatus('loading', 'Menyambungkan');
+
+  els.tuning.classList.remove('active');
+  requestAnimationFrame(() => els.tuning.classList.add('active'));
+
+  if (shakaPlayer) { 
+    try { await shakaPlayer.destroy(); } catch(e) {}
+    shakaPlayer = null; 
+  }
+  if (hls) { 
+    hls.destroy(); 
+    hls = null; 
+  }
+
+  const isDash = ch.url.toLowerCase().includes('.mpd');
+  const hasDrm = ch.drmType || ch.drmKey;
+
+  const proxyParams = new URLSearchParams();
+  proxyParams.set('url', ch.url);
+  if (!isDash) proxyParams.set('type', 'm3u8');
+  let proxyCustomHeaders = [];
+  for (const [k, v] of Object.entries(ch.headers || {})) {
+    if (k.toLowerCase() === 'user-agent') proxyParams.set('ua', v);
+    else if (k.toLowerCase() === 'referer') proxyParams.set('ref', v);
+    else proxyCustomHeaders.push(k + ':' + v);
+  }
+  if (proxyCustomHeaders.length > 0) proxyParams.set('headers', JSON.stringify(proxyCustomHeaders));
+  const proxiedUrl = '/proxy?q=' + encodeURIComponent(xorBase64(proxyParams.toString(), SECRET_KEY));
+
+  if (isDash || hasDrm) {
+    shaka.polyfill.installAll();
+    shakaPlayer = new shaka.Player(els.video);
+
+    let drmHeaders = {};
+    let licenseUrl = ch.drmKey || '';
+    if (licenseUrl.includes('|')) {
+      const parts = licenseUrl.split('|');
+      licenseUrl = parts[0];
+      const hParts = parts[1].split('&');
+      for (const p of hParts) {
+        const eqIdx = p.indexOf('=');
+        if (eqIdx > 0) {
+          drmHeaders[p.substring(0, eqIdx).trim()] = p.substring(eqIdx + 1).trim();
+        }
+      }
+    }
+
+    for (const [k, v] of Object.entries(ch.headers || {})) {
+       if (!drmHeaders[k]) drmHeaders[k] = v;
+    }
+
+    let proxiedLicenseUrl = licenseUrl;
+    if (licenseUrl && licenseUrl.startsWith('http')) {
+      const licParams = new URLSearchParams();
+      licParams.set('url', licenseUrl);
+      let customHeaders = [];
+      for (const [k, v] of Object.entries(drmHeaders)) {
+         if (k.toLowerCase() === 'user-agent') licParams.set('ua', v);
+         else if (k.toLowerCase() === 'referer') licParams.set('ref', v);
+         else customHeaders.push(k + ':' + v);
+      }
+      if (customHeaders.length > 0) licParams.set('headers', JSON.stringify(customHeaders));
+      proxiedLicenseUrl = window.location.origin + '/proxy?q=' + encodeURIComponent(xorBase64(licParams.toString(), SECRET_KEY));
+    }
+
+    shakaPlayer.getNetworkingEngine().registerRequestFilter((type, request) => {
+      if (type === shaka.net.NetworkingEngine.RequestType.LICENSE) {
+        // Headers are already passed via proxy URL parameters (ua, ref, headers).
+        // Setting them here directly causes browser 'unsafe header' errors for User-Agent/Referer.
+        return;
+      }
+
+      const uri = request.uris[0];
+      if (uri.startsWith('blob:') || uri.startsWith('data:')) return;
+      
+      // Bypass proxy untuk segment media murni agar langsung ditarik dari CDN (Aman dari block/rate-limit worker)
+      if (uri.includes('.mp4') || uri.includes('.ts') || uri.includes('.m4s') || uri.includes('.m4a') || uri.includes('brightcove')) return;
+
+      if (!uri.includes('/proxy?q=')) {
+        const segParams = new URLSearchParams();
+        segParams.set('url', uri);
+        let customHeaders = [];
+        for (const [k, v] of Object.entries(ch.headers || {})) {
+          if (k.toLowerCase() === 'user-agent') segParams.set('ua', v);
+          else if (k.toLowerCase() === 'referer') segParams.set('ref', v);
+          else customHeaders.push(k + ':' + v);
+        }
+        if (customHeaders.length > 0) segParams.set('headers', JSON.stringify(customHeaders));
+        request.uris[0] = window.location.origin + '/proxy?q=' + encodeURIComponent(xorBase64(segParams.toString(), SECRET_KEY));
       }
     });
 
-    res.writeHead(response.status);
+    shakaPlayer.getNetworkingEngine().registerResponseFilter((type, response) => {
+      if (type === shaka.net.NetworkingEngine.RequestType.MANIFEST) {
+        response.uri = ch.url;
+        let drmTypeClean = ch.drmType ? ch.drmType.toLowerCase() : '';
+        let licenseUrl = ch.drmKey || '';
+        if (!drmTypeClean && licenseUrl) {
+          if (licenseUrl.includes(':') || licenseUrl.startsWith('{')) drmTypeClean = 'clearkey';
+        }
+        if (drmTypeClean === 'clearkey' || drmTypeClean.includes('clearkey')) {
+          let manifestText = new TextDecoder().decode(response.data);
+          if (manifestText.includes('<ContentProtection') && !manifestText.includes('e2719d58-a985-b3c9-781a-b030af78d30e')) {
+             manifestText = manifestText.replace(
+                /<\\/ContentProtection>/g,
+                '<\\/ContentProtection>\\n<ContentProtection schemeIdUri="urn:uuid:e2719d58-a985-b3c9-781a-b030af78d30e"><\\/ContentProtection>'
+             );
+             manifestText = manifestText.replace(
+                /(<ContentProtection[^>]*\\/>)/g,
+                '$1\\n<ContentProtection schemeIdUri="urn:uuid:e2719d58-a985-b3c9-781a-b030af78d30e"><\\/ContentProtection>'
+             );
+             response.data = new TextEncoder().encode(manifestText);
+          }
+        }
+      } else if (type === shaka.net.NetworkingEngine.RequestType.LICENSE) {
+        try {
+          const text = new TextDecoder().decode(response.data);
+          let licBase64 = null;
+          if (text.startsWith('{')) {
+            const json = JSON.parse(text);
+            licBase64 = json.license || json.data || json.key || json.payload || json.keys;
+          } else if (/^[A-Za-z0-9+/=\\s]+$/.test(text) && text.length > 20) {
+            licBase64 = text.trim();
+          }
+          if (licBase64 && typeof licBase64 === 'string') {
+             const binaryString = atob(licBase64);
+             const bytes = new Uint8Array(binaryString.length);
+             for (let i = 0; i < binaryString.length; i++) {
+               bytes[i] = binaryString.charCodeAt(i);
+             }
+             response.data = bytes;
+          }
+        } catch (e) {}
+      }
+    });
+
+    const config = { 
+      drm: {},
+      abr: {
+        enabled: true,
+        defaultBandwidthEstimate: 1000000
+      },
+      streaming: {
+        bufferingGoal: 60,
+        rebufferingGoal: 5, // Kurangi agar lebih cepat lanjut
+        bufferBehind: 30,
+        jumpLargeGaps: true, // WAJIB untuk live stream HLS agar tidak nyangkut (muter-muter)
+        smallGapLimit: 2.5,
+        ignoreTextStreamFailures: true,
+        retryParameters: { maxAttempts: 10, baseDelay: 1000, backoffFactor: 2 }
+      },
+      manifest: {
+        dash: {
+          ignoreSuggestedPresentationDelay: true,
+          defaultPresentationDelay: 20
+        },
+        retryParameters: { maxAttempts: 10, baseDelay: 1000, backoffFactor: 2 }
+      }
+    };
+
+    if (hasDrm) {
+      let drmTypeClean = ch.drmType ? ch.drmType.toLowerCase() : '';
+      
+      if (!drmTypeClean && licenseUrl) {
+        if (licenseUrl.startsWith('http')) drmTypeClean = 'widevine';
+        else if (licenseUrl.includes(':') || licenseUrl.startsWith('{')) drmTypeClean = 'clearkey';
+      }
+
+      if (drmTypeClean === 'clearkey' || drmTypeClean.includes('clearkey')) {
+        if (licenseUrl.startsWith('http') && (licenseUrl.toLowerCase().includes('mrpw') || licenseUrl.toLowerCase().includes('widevine'))) {
+          config.drm.servers = { 'com.widevine.alpha': proxiedLicenseUrl };
+          config.drm.advanced = {
+            'com.widevine.alpha': { videoRobustness: 'SW_SECURE_CRYPTO', audioRobustness: 'SW_SECURE_CRYPTO' }
+          };
+        } else if (licenseUrl.startsWith('http')) {
+          config.drm.servers = { 'org.w3.clearkey': proxiedLicenseUrl };
+        } else {
+          try {
+            if (licenseUrl.startsWith('{')) {
+              config.drm.clearKeys = JSON.parse(licenseUrl);
+            } else {
+              const keys = {};
+              const pairs = licenseUrl.split(',');
+              for (const pair of pairs) {
+                const parts = pair.split(':');
+                if (parts.length >= 2) {
+                  const k = parts[0].replace(/['"]/g, '').trim();
+                  const v = parts[1].replace(/['"]/g, '').trim();
+                  keys[k] = v;
+                }
+              }
+              if (Object.keys(keys).length > 0) config.drm.clearKeys = keys;
+            }
+          } catch(e) { console.error('ClearKey parse error', e); }
+        }
+      } else if (drmTypeClean.includes('widevine') || drmTypeClean === 'com.widevine.alpha') {
+        config.drm.servers = { 'com.widevine.alpha': proxiedLicenseUrl };
+        config.drm.advanced = {
+          'com.widevine.alpha': { videoRobustness: 'SW_SECURE_CRYPTO', audioRobustness: 'SW_SECURE_CRYPTO' }
+        };
+      } else if (drmTypeClean.includes('playready') || drmTypeClean === 'com.microsoft.playready') {
+        config.drm.servers = { 'com.microsoft.playready': proxiedLicenseUrl };
+      }
+    }
+
+    shakaPlayer.configure(config);
+
+    shakaPlayer.addEventListener('variantchanged', () => {
+      const variant = shakaPlayer.getVariantTracks().find(t => t.active);
+      if (variant) {
+        const res = variant.width && variant.height ? variant.width + 'x' + variant.height : '--x--';
+        const kbps = variant.bandwidth ? Math.round(variant.bandwidth / 1000) : '--';
+        els.roStat.textContent = res + ' · ' + kbps + ' kbps';
+      }
+    });
+
+    shakaPlayer.addEventListener('error', (event) => {
+      if (event.detail && event.detail.fatal) {
+        setStatus('error', 'DRM Error: ' + event.detail.code);
+        console.error("Shaka Error Detail:", event.detail);
+      }
+    });
+
+    shakaPlayer.load(ch.url).then(() => {
+      updateShakaQualitySelect();
+      els.video.play().catch(() => {});
+      setStatus('live', hasDrm ? 'Live (DRM)' : 'Live (DASH)');
+    }).catch(err => {
+      setStatus('error', 'Gagal memuat DASH: ' + err.code);
+    });
+
+    els.video.addEventListener('playing', () => {
+      if (shakaPlayer) setStatus('live', hasDrm ? 'Live (DRM)' : 'Live (DASH)');
+    }, { once: false });
+
+  } else {
+    if (window.Hls && window.Hls.isSupported()) {
+      hls = new Hls({ 
+        enableWorker: true,
+        maxBufferLength: 60,
+        maxMaxBufferLength: 120,
+        liveSyncDurationCount: 6, // Mundur 6 segmen (~30-60 detik) dari live edge
+        liveMaxLatencyDurationCount: 15,
+        fragLoadingMaxRetry: 10,
+        manifestLoadingMaxRetry: 10,
+        levelLoadingMaxRetry: 10,
+        startLevel: -1 // Auto ABR dari awal
+      });
+      hls.loadSource(proxiedUrl);
+      hls.attachMedia(els.video);
+
+      hls.on(Hls.Events.MANIFEST_PARSED, () => {
+        updateHlsQualitySelect();
+        els.video.play().catch(() => {});
+      });
+
+      hls.on(Hls.Events.LEVEL_SWITCHED, (_, data) => {
+        const level = hls.levels[data.level];
+        if (level) {
+          const res = level.width && level.height ? level.width + 'x' + level.height : '--x--';
+          const kbps = level.bitrate ? Math.round(level.bitrate / 1000) : '--';
+          els.roStat.textContent = res + ' · ' + kbps + ' kbps';
+        }
+      });
+
+      hls.on(Hls.Events.ERROR, (_, data) => {
+        if (data.fatal) setStatus('error', 'Error HLS: ' + data.type);
+      });
+
+      els.video.addEventListener('playing', () => {
+        if (hls) setStatus('live', 'Live');
+      }, { once: false });
+    } else if (els.video.canPlayType('application/vnd.apple.mpegurl')) {
+      // Fallback Native Player (biasanya Safari/iOS) - Quality Selector manual tidak didukung
+      els.video.src = proxiedUrl;
+      els.video.addEventListener('loadedmetadata', () => els.video.play().catch(() => {}), { once: true });
+      els.video.addEventListener('playing', () => setStatus('live', 'Live'));
+      els.video.addEventListener('error', () => setStatus('error', 'Error memutar'));
+    } else {
+      setStatus('error', 'HLS tidak didukung');
+    }
+  }
+}
+
+function setStatus(kind, label) {
+  els.roStatus.className = 'readout-status' + (kind ? ' ' + kind : '');
+  els.roStatus.textContent = label;
+}
+
+function escapeHtml(str) {
+  const div = document.createElement('div');
+  div.textContent = str;
+  return div.innerHTML;
+}
+
+// --- Fake Online Users Logic ---
+(function initFakeUsers() {
+  const onlineCountEl = document.getElementById('onlineCount');
+  if (!onlineCountEl) return;
+  
+  // Base number antara 950 dan 1400
+  let currentOnline = Math.floor(Math.random() * (1400 - 950 + 1)) + 950;
+  onlineCountEl.innerHTML = '<strong>' + currentOnline.toLocaleString('id-ID') + '</strong>';
+
+  setInterval(() => {
+    // Berubah secara acak -15 sampai +20
+    const change = Math.floor(Math.random() * 36) - 15;
+    currentOnline += change;
     
-    if (response.body) {
-      for await (const chunk of response.body) {
+    // Jangan sampai di bawah 910
+    if (currentOnline < 910) {
+      currentOnline += Math.floor(Math.random() * 50) + 30;
+    }
+    
+    // Sesekali lompat naik agar terlihat dinamis
+    if (Math.random() < 0.05) {
+      currentOnline += Math.floor(Math.random() * 120) + 50;
+    }
+
+    onlineCountEl.innerHTML = '<strong>' + currentOnline.toLocaleString('id-ID') + '</strong>';
+  }, 3500); // Update setiap 3.5 detik
+})();
+
+// Chat Toggle Logic
+(function initChatToggle() {
+  const btn = document.getElementById('toggleChatBtn');
+  const chat = document.querySelector('.chat-sidebar');
+  const chatContainer = document.getElementById('chatContainer');
+  
+  if (btn && chat) {
+    const toggleChat = (forceHide) => {
+      if (forceHide) {
+        chat.classList.add('hidden');
+      } else {
+        chat.classList.toggle('hidden');
+      }
+      btn.style.opacity = chat.classList.contains('hidden') ? '0.5' : '1';
+    };
+
+    btn.addEventListener('click', () => toggleChat(false));
+
+    // Sinkronisasi dengan tombol X bawaan Chatango (jika diklik dari dalam)
+    if (chatContainer) {
+      const styleObserver = new MutationObserver((mutations) => {
+        mutations.forEach((mutation) => {
+          if (mutation.type === 'attributes' && mutation.attributeName === 'style') {
+            const target = mutation.target;
+            if (target.style.display === 'none') {
+              toggleChat(true); // Sembunyikan box utama
+              target.style.display = 'block'; // Reset display Chatango agar bisa dibuka lagi
+            }
+          }
+        });
+      });
+
+      const childObserver = new MutationObserver(() => {
+        const chatangoDiv = chatContainer.querySelector('div');
+        if (chatangoDiv) {
+          styleObserver.observe(chatangoDiv, { attributes: true, attributeFilter: ['style'] });
+          childObserver.disconnect();
+        }
+      });
+      childObserver.observe(chatContainer, { childList: true });
+    }
+  }
+})();
+
+// Anti-Inspect Logic (Mencegah klik kanan dan F12)
+document.addEventListener('contextmenu', e => e.preventDefault());
+document.addEventListener('keydown', e => {
+  if (e.key === 'F12' || 
+      (e.ctrlKey && e.shiftKey && (e.key === 'I' || e.key === 'i' || e.key === 'J' || e.key === 'j' || e.key === 'C' || e.key === 'c')) ||
+      (e.ctrlKey && (e.key === 'U' || e.key === 'u'))) {
+    e.preventDefault();
+  }
+});
+`;
+
+const HTML = `<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>STREAMCROT — BANG ARIV</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Oswald:wght@400;500;600;700&family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+${CSS}
+</style>
+</head>
+<body>
+  <div class="app">
+    <header class="topbar">
+      <div class="brand">
+        <span class="brand-mark">STREAMCROT</span>
+        <span class="brand-sub">By Bang Ariv</span>
+      </div>
+      <div class="online-users" title="Pengguna Online">
+        <span class="pulse-dot"></span>
+        <span id="onlineCount"><strong>...</strong></span> Online
+      </div>
+      <button type="button" id="toggleChatBtn" class="toggle-chat-btn" title="Sembunyikan/Tampilkan Chat" style="opacity: 0.5;">
+        💬 Chat
+      </button>
+      <form class="playlist-form" id="playlistForm">
+        <select id="playlistMode" class="playlist-select">
+          <option value="default">Playlist Bawaan</option>
+          <option value="custom">URL Kustom</option>
+        </select>
+        <input id="playlistUrl" type="url" placeholder="Tempel URL playlist M3U / M3U8..." autocomplete="off" spellcheck="false" required />
+        <button type="submit" id="loadBtn">Muat</button>
+      </form>
+    </header>
+
+    <div class="layout">
+      <aside class="sidebar">
+        <div class="sidebar-controls">
+          <input id="searchInput" type="search" placeholder="Cari channel..." />
+          <div class="group-chips" id="groupChips"></div>
+        </div>
+        <div class="channel-list" id="channelList">
+          <div class="empty-state">
+            <p class="empty-title">Belum ada siaran</p>
+            <p class="empty-body">Tempel URL playlist M3U/M3U8 di atas, lalu tekan <strong>Muat</strong> untuk menampilkan daftar channel.</p>
+          </div>
+        </div>
+        <div class="sidebar-footer" id="channelCount"></div>
+      </aside>
+
+      <main class="main">
+        <div class="player-wrap">
+          <video id="video" playsinline controls crossorigin="anonymous"></video>
+          <div class="tuning-overlay" id="tuningOverlay"></div>
+          <div class="player-placeholder" id="playerPlaceholder">
+            <span>Pilih channel untuk mulai menonton</span>
+          </div>
+        </div>
+
+        <div class="readout" id="readout">
+          <div class="readout-number" id="readoutNumber">--</div>
+          <div class="readout-info">
+            <div class="readout-name" id="readoutName">Tidak ada sinyal</div>
+            <div class="readout-meta">
+              <span class="readout-group" id="readoutGroup">—</span>
+              <span class="readout-divider">·</span>
+              <span class="readout-stat" id="readoutStat">--x-- · -- kbps</span>
+            </div>
+          </div>
+          <div class="readout-status-wrap">
+            <select id="qualitySelect" class="quality-select hidden"></select>
+            <div class="readout-status" id="readoutStatus"></div>
+          </div>
+        </div>
+
+        <div class="ticker-wrap">
+          <div class="ticker-content">
+            <span class="ticker-text">INFO: Setelah memilih streaming silahkan ubah resolusi/kualitas video sesuai dengan kecepatan internet kalian agar tidak buffering.</span>
+            <span class="ticker-highlight">🚀 SELAMAT MENONTON 🚀</span>
+          </div>
+        </div>
+      </main>
+
+      <aside class="chat-sidebar hidden">
+        <div class="chat-header">
+          <div class="chat-header-title">
+            <span class="pulse-dot" style="width: 6px; height: 6px;"></span>
+            GLOBAL CHAT
+          </div>
+          <span style="font-size: 10px; color: var(--text-dim); font-family: 'IBM Plex Mono', monospace;">● ONLINE</span>
+        </div>
+        <div class="chat-body" id="chatContainer">
+          <!-- Chatango Embed Widget (Direct script to prevent new tab on mobile) -->
+          <script id="cid0020000442443724111" data-cfasync="false" async src="https://st.chatango.com/js/gz/emb.js" style="width: 100%;height: 100%;">{"handle":"streamcrot-ariv","arch":"js","styles":{"a":"202020","b":100,"c":"ffcc00","d":"ffffff","e":"e0e0e0","k":"000000","l":"000000","m":"000000","n":"FFFFFF","p":"10","q":"000000","r":100,"usricon":0,"surl":0,"cnrs":"0.35","sml":1}}</script>
+        </div>
+      </aside>
+    </div>
+  </div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/shaka-player/4.7.1/shaka-player.compiled.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/hls.js/1.5.13/hls.min.js"></script>
+<script>
+${JS}
+</script>
+</body>
+</html>`;
+const PORT = 8080;
+const server = http.createServer(async (req, res) => {
+  try {
+    const proto = req.headers['x-forwarded-proto'] || 'http';
+    const url = new URL(req.url, `${proto}://${req.headers.host}`);
+    let body = null;
+    if (req.method !== 'GET' && req.method !== 'HEAD') {
+      const chunks = [];
+      for await (const chunk of req) chunks.push(chunk);
+      body = Buffer.concat(chunks);
+    }
+    const headers = new Headers();
+    for (let key in req.headers) {
+      if (Array.isArray(req.headers[key])) {
+        for (let val of req.headers[key]) headers.append(key, val);
+      } else {
+        headers.append(key, req.headers[key]);
+      }
+    }
+    const webReq = new Request(url.href, {
+      method: req.method,
+      headers: headers,
+      body: body,
+      duplex: 'half'
+    });
+    
+    const webRes = await handleRequest(webReq);
+    
+    const resHeaders = {};
+    webRes.headers.forEach((v, k) => { resHeaders[k] = v; });
+    res.writeHead(webRes.status, resHeaders);
+    
+    if (webRes.body) {
+      for await (const chunk of webRes.body) {
         res.write(chunk);
       }
       res.end();
     } else {
       res.end();
     }
-  } catch (error) {
-    console.error('Fetch Error:', error);
-    res.writeHead(502, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ error: 'Proxy gagal', detail: error.message }));
+  } catch (e) {
+    console.error(e);
+    if (!res.headersSent) res.writeHead(500);
+    res.end(e.toString());
   }
 });
 
 server.listen(PORT, '0.0.0.0', () => {
-  console.log(`Proxy aktif di port ${PORT}`);
+  console.log(`🚀 Siaran IPTV VPS Proxy Server running on port ${PORT}`);
 });
