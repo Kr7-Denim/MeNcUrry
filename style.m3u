@@ -1,0 +1,18 @@
+#EXTM3U
+#EXTINF:-1 group-logo="" group-title="LIGA 1" tvg-id="" tvg-logo="https://upload.wikimedia.org/wikipedia/commons/thumb/c/c8/Indosiar_2015.svg/1280px-Indosiar_2015.svg.png",INDOSIAR
+https://jrot.animecrot.my.id/proxy/aHR0cHM6Ly9xdHYubXkuaWQvdGVzdG9rZW4vY29tLm0zdTg_aWQ9aW5kb3NpYXI.m3u8
+
+#EXTINF:-1 group-logo="" group-title="AFF" tvg-id="" tvg-logo="https://upload.wikimedia.org/wikipedia/commons/thumb/d/dd/RCTI_logo_2015.svg/1280px-RCTI_logo_2015.svg.png",RCTI
+https://jrot.animecrot.my.id/proxy/aHR0cHM6Ly9xdHYubXkuaWQvdGVzdG9rZW4vY29tLm0zdTg_aWQ9UkNUSQ.m3u8
+
+#EXTINF:-1 group-logo="" group-title="AFF" tvg-id="GTV" tvg-logo="https://upload.wikimedia.org/wikipedia/commons/3/39/GTV_logo_%282017%29.png", GTV
+https://jrot.animecrot.my.id/proxy/aHR0cHM6Ly9xdHYubXkuaWQvdGVzdG9rZW4vY29tLm0zdTg_aWQ9R1RW.m3u8
+
+#EXTINF:-1 group-logo="" group-title="INDO VS ASTON" tvg-id="antv" tvg-logo="https://upload.wikimedia.org/wikipedia/commons/thumb/2/2e/Antv_logo.svg/1280px-Antv_logo.svg.png", ANTV
+https://jrot.animecrot.my.id/proxy/aHR0cHM6Ly9xdHYubXkuaWQvdGVzdG9rZW4vY29tLm0zdTg_aWQ9YW50dg.m3u8
+
+#EXTINF:-1 group-logo="" group-title="VOLLY" tvg-id="" tvg-logo="https://thumbor.prod.vidiocdn.com/bwUEILb_i5ngA1tmC0WaTOP9gCc=/filters:quality(70)/vidio-web-prod-livestreaming/uploads/livestreaming/image/206/moji-a5bd3e.jpg",MOJI
+https://jrot.animecrot.my.id/proxy/aHR0cHM6Ly9xdHYubXkuaWQvdGVzdG9rZW4vY29tLm0zdTg_aWQ9bW9qaQ.m3u8
+
+#EXTINF:-1 group-logo="" group-title="VOLLY" tvg-id="" tvg-logo="https://upload.wikimedia.org/wikipedia/commons/3/35/Logo_Voli_TV.png",Voli TV
+https://jrot.animecrot.my.id/proxy/aHR0cHM6Ly9xdHYubXkuaWQvdGVzdG9rZW4vY29tLm0zdTg_aWQ9dm9saXR2.m3u8
