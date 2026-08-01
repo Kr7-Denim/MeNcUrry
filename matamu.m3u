@@ -1,11 +1,17 @@
 #EXTM3U
+#EXTINF:-1 group-title="PIALA AFF" tvg-id="" tvg-logo="https://raw.githubusercontent.com/MaybeUnknown404/404/refs/heads/main/lv_0_20260728085402.gif",Sportstarss 2 🇮🇩
+#EXTVLCOPT:http-user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36 Edg/150.0.0.0
+#EXTVLCOPT:http-referrer=https://www.visionplus.id/
+#KODIPROP:inputstream.adaptive.license_type=org.w3.clearkey
+#KODIPROP:inputstream.adaptive.license_key=https://ayo.maling.pl/V/vision/id=13.play
+https://d3b0v7fggu5zwm.cloudfront.net/out/v1/d2c68a3dfb644808b416bd90dcc92d5f/index.mpd
+
 #EXTINF:-1 group-title="PIALA AFF" tvg-id="" tvg-logo="https://raw.githubusercontent.com/MaybeUnknown404/404/refs/heads/main/lv_0_20260728085402.gif",Sportstars 2 🇮🇩
 #EXTVLCOPT:http-user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36 Edg/150.0.0.0
 #EXTVLCOPT:http-referrer=https://www.visionplus.id/
 #KODIPROP:inputstream.adaptive.license_type=org.w3.clearkey
 #KODIPROP:inputstream.adaptive.license_key=911e72adf36946afbdbb4f80782a8394:08aec548a851ba64b7172ae7f05cb91c
 https://d3b0v7fggu5zwm.cloudfront.net/out/v1/d2c68a3dfb644808b416bd90dcc92d5f/index.mpd
-
 
 #EXTINF:-1 group-title="PIALA AFF" tvg-id="" tvg-logo="https://raw.githubusercontent.com/MaybeUnknown404/404/refs/heads/main/lv_0_20260728085402.gif",M LIVE 5  🇸🇬
 #KODIPROP:inputstream.adaptive.license_type=clearkey
